@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: "CI"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: nim-lang/setup-nimble-action@v1
+        with:
+          nimble-version: nightly
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pinned deps
+        run: nimble setup
+
+      - name: Build binaries
+        run: nimble build2
+
+      - name: Run tests
+        run: nimble test
+
+  lint:
+    name: "Check formatting"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Check `nph` formatting
+        uses: arnetheduck/nph-action@v1
+        with:
+          version: 0.7.0
+          options: "."

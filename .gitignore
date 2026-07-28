@@ -1,0 +1,10 @@
+nimble.develop
+nimble.paths
+nimbledeps
+/src/libshell.*
+/src/runtime_tui
+/tests/tmod_dispatch
+/tests/tmod_load
+/tests/tmod_tcp
+/src/runtime_cli
+/src/librt.*

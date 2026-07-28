@@ -1,0 +1,129 @@
+import std/osproc
+import cbor_serialization, cbor_serialization/std/tables
+import stew/byteutils
+import logos_core/abi_types
+
+# Metadata
+const
+  moduleName = "shell"
+  version = "1.0"
+  schema = """
+; -- metadata --
+_module = "shell"
+_version = [1, 0]
+
+; -- types --
+
+; -- methods --
+shell.exec_request = {
+    command: tstr,
+    args: tstr,
+}
+
+shell.exec_response = {
+    output: tstr,
+}"""
+
+type
+  ExecRequest* = object
+    command*: string
+    args*: string
+
+  ExecResponse* = object
+    output*: string
+
+proc logos_module_name(): cstring {.exportc, dynlib.} =
+  moduleName.cstring
+
+proc logos_shell_name(): cstring {.exportc, dynlib.} =
+  moduleName.cstring
+
+proc logos_shell_schema(): cstring {.exportc, dynlib.} =
+  schema.cstring
+
+proc logos_shell_version(): cstring {.exportc, dynlib.} =
+  version.cstring
+
+proc logos_shell_init(): cint {.exportc, dynlib.} =
+  0
+
+proc logos_shell_destroy(): void {.exportc, dynlib.} =
+  discard
+
+# The core functionality: executing a command and capturing its output
+proc exec_implementation(command: string, args: string): string =
+  try:
+    # execProcess from osproc captures stdout and returns it
+    return execProcess(command)
+  except:
+    return "Error: Failed to execute command"
+
+# The C API implementation for the 'exec' method
+# This matches the signature derived from the CDDL spec in section 2.4.
+# In a real implementation, this would involve decoding the dCBOR parameters.
+proc logos_shell_call_exec(
+    h: pointer,
+    command: cstring,
+    args: cstring, # Simplified for this implementation
+    args_len: csize_t,
+    out_output: ptr cstring,
+): cint =
+  try:
+    let cmdStr = $command
+    # For this shell, we execute the command string.
+    # A full implementation would parse the args array from dCBOR.
+    let output = exec_implementation(cmdStr, "")
+    out_output[] = output.cstring
+    return LOGOS_OK
+  except:
+    return LOGOS_ERR_MODULE
+
+# The socket-mode entry point (dispatch)
+# Implements the behavior described in section 2.6
+proc logos_shell_dispatch(
+    ctx: pointer,
+    methodName: cstring,
+    request_payload: ptr uint8,
+    request_len: csize_t,
+    response_payload: ptr ptr uint8,
+    response_len: ptr csize_t,
+): cint {.exportc, dynlib.} =
+  try:
+    let meth = $methodName
+
+    # Convert the raw bytes to a seq for decoding
+    var request_bytes = newSeq[byte](request_len)
+    if request_len > 0 and not request_payload.isNil:
+      copyMem(addr request_bytes[0], request_payload, request_len)
+
+    case meth
+    of "exec":
+      # Decode the CBOR request
+      let req = Cbor.decode(request_bytes, ExecRequest)
+
+      # Execute the command
+      let output = exec_implementation(req.command, req.args)
+
+      # Create the response
+      let resp = ExecResponse(output: output)
+
+      # Encode the response to CBOR
+      let resp_bytes = Cbor.encode(resp)
+
+      # Allocate memory for the response and copy data
+      if resp_bytes.len > 0:
+        let resp_buf = cast[ptr uint8](allocShared(resp_bytes.len))
+        copyMem(resp_buf, addr resp_bytes[0], resp_bytes.len)
+        response_payload[] = resp_buf
+      else:
+        response_payload[] = nil
+
+      response_len[] = resp_bytes.len.csize_t
+      LOGOS_OK
+    else:
+      LOGOS_ERR_METHOD_NOT_FOUND
+  except:
+    LOGOS_ERR_INVALID_PARAMS
+
+proc logos_shell_free(p: pointer) {.exportc, dynlib.} =
+  deallocShared(p)

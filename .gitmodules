@@ -1,0 +1,4 @@
+[submodule "docs/spec"]
+	path = docs/spec
+	url = https://github.com/logos-co/logos-lips.git
+	branch = draft/logos-core-module-specs
