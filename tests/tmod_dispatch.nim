@@ -1,59 +1,58 @@
-# Tests for dispatching methods through the runtime
+# Tests for dispatching methods through the runtime (new ABI).
 
 import
   unittest2,
   std/[os, strutils],
-  ../src/logos_core/[runtime, modules, cbor_stuff],
-  cbor_serialization,
-  cbor_serialization/std/tables,
+  ../src/logos_core/[runtime, modules, cbor_profile],
   results
 
 # Resolve the .so path relative to this tests/ directory
 var shellSo = getCurrentDir() / "src" / "libshell.so"
 normalizePath(shellSo)
 
-suite "Runtime dispatch (shell module)":
-  test "dispatchPlugin with ls command returns files":
+proc execParams(command, args: string): seq[byte] =
+  encodeCbor(
+    cborMap(
+      (cborValue("command"), cborValue(command)), (cborValue("args"), cborValue(args))
+    )
+  )
+
+proc outputOf(resp: seq[byte]): string =
+  let v = decodeCbor(resp)
+  v.mapGet("output").s
+
+suite "Runtime dispatch (shell module, new ABI)":
+  test "dispatchPlugin with echo returns the echoed text":
     var rt = newRuntime()
-    discard rt.load(shellSo).expect("shell gets loaded")
+    discard rt.load(shellSo, "shell", true).expect("shell gets loaded")
 
-    # Build CBOR params: {"command": "ls", "args": "/"}
-    var paramMap = initOrderedTable[string, CborValueRef]()
-    paramMap["command"] = CborValueRef(kind: CborValueKind.String, strVal: "ls")
-    paramMap["args"] = CborValueRef(kind: CborValueKind.String, strVal: "/")
-    let cborParams = Cbor.encode(paramMap)
-
-    let res = rt.dispatchPlugin("shell", "exec", cborParams)
+    let res = rt.dispatchPlugin("shell", "exec", execParams("echo", "hello-logos"))
     check res.isOk
-    let output = res.get
-
-    # Verify the output contains some files
-    check output.len > 0
-
-    # Decode the response as a string (it's the raw stdout from ls /)
-    let outputStr = cast[cstring](addr output[0])
-    check $outputStr != ""
-    check $outputStr != "Error: Failed to execute command"
+    let output = outputOf(res.get)
+    check output.contains("hello-logos")
 
     rt.shutdown()
 
   test "dispatchPlugin with pwd returns a path":
     var rt = newRuntime()
-    discard rt.load(shellSo).expect("shell gets loaded")
+    discard rt.load(shellSo, "shell", true).expect("shell gets loaded")
 
-    var paramMap = initOrderedTable[string, CborValueRef]()
-    paramMap["command"] = CborValueRef(kind: CborValueKind.String, strVal: "pwd")
-    paramMap["args"] = CborValueRef(kind: CborValueKind.String, strVal: "")
-    let cborParams = Cbor.encode(paramMap)
-
-    let res = rt.dispatchPlugin("shell", "exec", cborParams)
+    let res = rt.dispatchPlugin("shell", "exec", execParams("pwd", ""))
     check res.isOk
-    let output = res.get
+    let output = outputOf(res.get)
     check output.len > 0
 
-    let outputStr = cast[cstring](addr output[0])
-    check $outputStr != ""
-    check $outputStr != "Error: Failed to execute command"
+    rt.shutdown()
+
+  test "dispatchPlugin with a failing command reports the shell error":
+    var rt = newRuntime()
+    discard rt.load(shellSo, "shell", true).expect("shell gets loaded")
+
+    let res =
+      rt.dispatchPlugin("shell", "exec", execParams("definitely_not_a_cmd_xyz", ""))
+    check res.isOk
+    let output = outputOf(res.get)
+    check output.contains("not found")
 
     rt.shutdown()
 
@@ -66,13 +65,17 @@ suite "Runtime dispatch (shell module)":
 
   test "dispatchPlugin nonexistent method fails":
     var rt = newRuntime()
-    discard rt.load(shellSo).expect("shell gets loaded")
+    discard rt.load(shellSo, "shell", true).expect("shell gets loaded")
 
-    var paramMap = initOrderedTable[string, CborValueRef]()
-    paramMap["command"] = CborValueRef(kind: CborValueKind.String, strVal: "echo")
-    paramMap["args"] = CborValueRef(kind: CborValueKind.String, strVal: "hello")
-    let cborParams = Cbor.encode(paramMap)
+    let res = rt.dispatchPlugin("shell", "nope", execParams("echo", "x"))
+    check res.isErr
+    rt.shutdown()
 
-    let res = rt.dispatchPlugin("shell", "nope", cborParams)
+  test "dispatchPlugin with malformed params fails":
+    var rt = newRuntime()
+    discard rt.load(shellSo, "shell", true).expect("shell gets loaded")
+
+    # not a map
+    let res = rt.dispatchPlugin("shell", "exec", encodeCbor(cborValue("x")))
     check res.isErr
     rt.shutdown()

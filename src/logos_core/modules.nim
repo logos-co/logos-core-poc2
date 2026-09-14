@@ -2,7 +2,7 @@
 # High-level Nim-friendly types for the Logos module interface.
 # Wraps C ABI types with convenience conversions (cstring→string, pointer/len→seq[byte]).
 
-import results, ./abi_types, ./rt_types
+import results, ./abi_types, ./rt_types, ./shared_modules, ./transport
 
 # ============================================================================
 # Reexports — types that are identical at ABI and high-level
@@ -21,19 +21,28 @@ export
 # ============================================================================
 
 export
-  ModuleName, RuntimeInstanceId, ModuleProviderId, ModuleInstanceId, SchemaNamespace
-export RouteId, DescriptorKind, AuthorityRef, AuditRef, HostName, Port, Path
-export ServerName, Alpn, AddressProfile, FailureCode, Reason, SchemaModel
-export RuntimeAddressTag, UnixStreamAddress, TcpAddress, TlsTcpAddress, QuicAddress
-export RuntimeAddress, RuntimeEndpoint, RemoteProviderTarget, ModuleProviderAddress
-export SchemaCommitment
+  ModuleName, RuntimeInstanceId, ModuleProviderId, ModuleInstanceId, RouteId,
+  ModuleStateAssignmentId
+export ModuleInstanceAddress, ModuleProviderAddress
+export Reason, AddressProfile, DecisionId, FailureCode, HostName, Port, Path
+export ServerName, Alpn, TrustAnchorId, SubjectPublicKeyInfo
 export ModuleState, ModuleMode, RouteState
-export InvocationDescriptor, RouteAuthority, RouteFailure, ModuleRecord, RouteRecord
+export RuntimeAddressKind, UnixStreamRuntimeAddress, TlsTcpRuntimeAddress
+export QuicRuntimeAddress, RuntimeAddress, RuntimeEndpoint, RemoteProviderTarget
+export RemoteListenerAddress
+export RemoteIdentityProfile, RemoteRuntimeEnrollment, RemoteListenerRecord
+export ProviderExportRecord
+export SchemaCommitment
+export InvocationDescriptor, RouteFailure, RouteAccess, ModuleRecord, RouteRecord
+export EstablishRouteRequest, EstablishRouteResponse, RenewRouteRequest
+export RenewRouteResponse, ListModulesRequest, ListModulesResponse
+export ListRoutesRequest, ListRoutesResponse, CloseRouteRequest
+export CloseRouteResponse, StartModuleRequest, StartModuleResponse
+export StopModuleRequest, StopModuleResponse, GetReadinessRequest
+export GetReadinessResponse, ModuleStateChangedEvent, RouteStateChangedEvent
 
 ## String conversion helpers
-export
-  stateName, modeName, routeStateName, stringToModuleState, stringToModuleMode,
-  stringToRouteState
+export stateName, modeName, routeStateName, isTerminalRouteState
 
 # ============================================================================
 # High-level function types
@@ -41,55 +50,39 @@ export
 # ============================================================================
 
 type
-  ## Lifecycle _init — returns 0 on success, non-zero error code
+  ## High-level lifecycle bridge: create one instance (0 on success, non-zero
+  ## error code). Closures in runtime.nim drive the new-ABI _init.
   InitFn* = proc(): cint {.api.}
 
-  ## Lifecycle destroy
+  ## High-level lifecycle bridge: destroy this instance's context.
   DestroyFn* = proc() {.api.}
 
-  ## Module memory deallocator
+  ## High-level memory deallocator bridge (new-ABI _free(module, p)).
   FreeFn* = proc(p: pointer) {.api.}
 
-  ## High-level dispatch — takes a method name and CBOR bytes, returns a Result of
-  ## CBOR bytes.
+  ## High-level dispatch bridge — takes a method name and deterministic-CBOR
+  ## bytes, returns a Result of deterministic-CBOR bytes.
   DispatchFn* =
     proc(meth: string, params: openArray[byte]): Result[seq[byte], string] {.api.}
 
-  ## Event publishing
-  PublishFn* = proc(eventData: seq[byte]) {.api.}
-
-  ## Setter for the high-level publish callback
-  PublishSetter* = proc(fn: PublishFn, userData: pointer) {.api.}
-
-  ## High-level call-module callback — takes target name and request bytes,
-  ## returns a Result with the response bytes.
-  CallModuleFn* = proc(
-    targetModule: string, requestCbor: openArray[byte]
-  ): Result[seq[byte], string] {.api.}
-
-  ## Response deallocator for call-module
-  FreeResponseFn* = proc(p: pointer) {.api.}
-
-  ## Setter for the high-level call-module callback
-  CallModuleSetter* =
-    proc(fn: CallModuleFn, freeFn: FreeResponseFn, userData: pointer) {.api.}
-
   ## A loaded Logos module at the high-level Nim API.
-  ## Holds the module metadata and the high-level dispatch function.
-  ## The actual FFI bridges are created by wrapDispatchFn etc.
+  ## The bridge closures (initFn/destroyFn/dispatchFn/freeFn) drive the new
+  ## C ABI (Phase 2); the new-ABI state below is the source of truth.
   Module* = object
     name*: string
     host*: string
     version*: string
     schema*: string
 
-    ## Mandatory lifecycle
+    ## High-level lifecycle/dispatch bridges (closures over the new ABI)
     initFn*: InitFn
     destroyFn*: DestroyFn
-
     dispatchFn*: DispatchFn
     freeFn*: FreeFn
 
-    ## Optional callbacks (may be nil if module doesn't publish or call modules)
-    publishSetter*: Opt[PublishSetter]
-    callModuleSetter*: Opt[CallModuleSetter]
+    ## New-ABI state (Phase 2): the loaded provider library, the
+    ## per-instance context, and this instance's runtime-control binding.
+    ## Nil for TCP-backed modules.
+    shared*: ptr SharedModule
+    ctx*: LogosModuleContext
+    rcBinding*: ptr LogosRuntimeControlBinding

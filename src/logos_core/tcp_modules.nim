@@ -37,7 +37,7 @@ proc init*(_: type TcpModule, target: string): Result[TcpModule, string] =
     module: "tcp_module_client",
     version: @[1'u32, 0'u32],
     token: @[],
-    schema: SchemaCommitment(
+    schema: transport.SchemaCommitment(
       commitmentModel: "logos.commitment-model.2026-06", # placeholder
       schemaRoot: @[],
       hashProfile: "logos.hash-profile.2026-05",

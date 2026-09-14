@@ -3,7 +3,7 @@
 # Per LOGOS-MODULE-TRANSPORT Section 1.3 (message definitions)
 # Types are imported from high_level.nim; this module adds transport-specific payloads.
 
-import std/[net, strutils], results, ./[cbor_stuff, modules]
+import std/[net, strutils], results, ./[cbor_stuff, modules, transport]
 
 const defaultTcpProtocol* = 1'u32
 
@@ -55,16 +55,16 @@ type
     module*: string
     version*: seq[uint32]
     token*: seq[byte]
-    schema*: SchemaCommitment
-    expectSchema*: Opt[SchemaCommitment]
+    schema*: transport.SchemaCommitment
+    expectSchema*: Opt[transport.SchemaCommitment]
 
   HelloResponse* = object
     protocol*: uint32
     module*: string
     version*: seq[uint32]
     token*: seq[byte]
-    schema*: SchemaCommitment
-    expectSchema*: Opt[SchemaCommitment]
+    schema*: transport.SchemaCommitment
+    expectSchema*: Opt[transport.SchemaCommitment]
 
 # ============================================================================
 # TCP target parsing utilities

@@ -320,7 +320,8 @@ proc loadSelectedBrowser*(state: var AppState) =
     refreshBrowser(state)
     state.status = "Entered " & item.name
   elif item.isLoadable:
-    let result = state.runtime.load(item.path)
+    # POC: derive the expected name from the file name; assume provider.
+    let result = state.runtime.load(item.path, moduleNameFromPath(item.path), true)
     if result.isOk:
       state.selectedPlugin = state.runtime.listPlugins().len - 1
       state.status = "Loaded plugin " & result.get[0]
@@ -525,7 +526,9 @@ proc runApp*() =
           state.status = "Failed to start TCP host: " & startRes.error
       of Key.F4:
         let target = "tcp://127.0.0.1:" & $defaultTcpHostPort
-        let result = state.runtime.load(target)
+        # TCP target: the expected name is resolved by the remote host, so
+        # the local placeholder is unused on the TCP branch.
+        let result = state.runtime.load(target, "", true)
         if result.isOk:
           state.selectedPlugin = state.runtime.listPlugins().len - 1
           state.status = "Connected to TCP target " & target

@@ -1,121 +1,73 @@
 # src/logos_core/rt_types.nim
-# Runtime Control schema types from LOGOS-MODULE-RUNTIME Section 9.1
-# Field names match CDDL exactly (underscore_case) for direct Cbor.encode/decode
+# Runtime Control contract types per LOGOS-MODULE-RUNTIME §9.2 / §9.3.
 #
-# These types can be passed to Cbor.encode() to produce an ordered map
-# where the field names become the CBOR map keys.
+# Field names in the CBOR encoding match the CDDL exactly (snake_case); the
+# Nim field names are camelCase (the encode/decode helpers in rt.nim map
+# between the two). The `logos.schema_commitment` value is the conformant
+# type from transport.nim (its CBOR keys are already snake_case).
 
 import results
+from ./transport import SchemaCommitment
+from ./cbor_profile import cmpBytes
 
 # ============================================================================
-# Type aliases matching CDDL schema names
-# ============================================================================
-
-type
-  ## Runtime Control type aliases - matching CDDL names exactly
-  StateName* = string
-  ModeName* = string
-  RouteStateName* = string
-  ModuleName* = string
-  RuntimeInstanceId* = string
-  ModuleProviderId* = string
-  ModuleInstanceId* = string
-  SchemaNamespace* = string
-  RouteId* = string
-  DescriptorKind* = string
-  AuthorityRef* = string
-  AuditRef* = string
-  HostName* = string
-  Port* = uint16
-  Path* = string
-  ServerName* = string
-  Alpn* = string
-  AddressProfile* = string
-  FailureCode* = string
-  Reason* = string
-  SchemaModel* = string
-
-# ============================================================================
-# Runtime address types
+# `logos.runtime` supporting schema types (§9.2) — shared non-callable
+# identities and addresses. tstr size bounds enforced at the boundary.
 # ============================================================================
 
 type
-  ## Runtime address transport tag
-  RuntimeAddressTag* {.pure.} = enum
-    ratUnixStream
-    ratTcp
-    ratTlsTcp
-    ratQuic
+  ModuleName* = string ## tstr 1..64
+  RuntimeInstanceId* = string ## tstr 1..128
+  ModuleInstanceId* = string ## tstr 1..128
+  ModuleProviderId* = string ## tstr 1..128
+  RouteId* = string ## tstr 1..128
+  ModuleStateAssignmentId* = string ## tstr 1..128
 
-  ## Per-transport address variants - field names match CDDL exactly
-  UnixStreamAddress* = object
-    transport*: string ## "unix-stream"
-    path*: Path
-    profile*: Opt[AddressProfile]
+  ## `logos.runtime.module_instance_address`
+  ModuleInstanceAddress* = object
+    runtimeInstanceId*: RuntimeInstanceId
+    moduleInstanceId*: ModuleInstanceId
 
-  TcpAddress* = object
-    transport*: string ## "tcp"
-    host*: HostName
-    port*: Port
-    profile*: Opt[AddressProfile]
-
-  TlsTcpAddress* = object
-    transport*: string ## "tls-tcp"
-    host*: HostName
-    port*: Port
-    server_name*: Opt[ServerName]
-    profile*: Opt[AddressProfile]
-
-  QuicAddress* = object
-    transport*: string ## "quic"
-    host*: HostName
-    port*: Port
-    server_name*: Opt[ServerName]
-    alpn*: Opt[Alpn]
-    profile*: Opt[AddressProfile]
-
-  ## Discriminated union for runtime address
-  RuntimeAddress* = object
-    tag*: RuntimeAddressTag
-    unixStream*: UnixStreamAddress
-    tcp*: TcpAddress
-    tlsTcp*: TlsTcpAddress
-    quic*: QuicAddress
-
-  ## Runtime identity + address pair - field names match CDDL exactly
-  RuntimeEndpoint* = object
-    runtime_instance_id*: Opt[RuntimeInstanceId]
-    address*: RuntimeAddress
-
-  ## Target for a remote provider - field names match CDDL exactly
-  RemoteProviderTarget* = object
-    runtime*: RuntimeEndpoint
-    provider*: Opt[ModuleProviderId]
-    module*: Opt[ModuleName]
-
-  ## Address of a provider record inside a runtime instance - field names match CDDL exactly
+  ## `logos.runtime.module_provider_address`
   ModuleProviderAddress* = object
-    runtime_instance_id*: Opt[RuntimeInstanceId]
+    runtimeInstanceId*: Opt[RuntimeInstanceId]
     provider*: ModuleProviderId
 
 # ============================================================================
-# Schema commitment
+# `logos.runtime_control` scalar types (§9.3)
 # ============================================================================
 
 type
-  ## Structural schema commitment - field names match CDDL exactly
-  SchemaCommitment* = object
-    commitment_model*: string
-    schema_root*: seq[byte]
-    hash_profile*: string
-    hash_suite*: string
+  Reason* = string ## tstr 0..512
+  AddressProfile* = string ## tstr 1..128
+  DecisionId* = string ## tstr 1..128
+  FailureCode* = string ## tstr 1..64
+  HostName* = string ## tstr 1..255
+  Port* = uint16
+  Path* = string ## tstr 1..4096
+  ServerName* = string ## tstr 1..255
+  Alpn* = string ## tstr 1..255
+  TrustAnchorId* = seq[byte] ## bstr 1..128
+  SubjectPublicKeyInfo* = seq[byte] ## bstr 1..8192
+
+  ## An explicit authority decision for one Runtime Control invocation
+  ## (capability-authority: a real allow/deny, not a stub allow).
+  AuthorityDecision* = object
+    allowed*: bool
+    decisionId*: DecisionId
+    reason*: string ## tstr 0..512
+
+  ## The Runtime's authority policy. The POC policy allows Runtime Control
+  ## operations from authenticated module instances of this runtime; a real
+  ## deployment supplies the policy records (grants/denials, scopes, audit).
+  AuthorityPolicy* = object
+    allowAuthenticated*: bool
 
 # ============================================================================
-# Module state and mode enums
+# Module state / mode / route state
 # ============================================================================
 
 type
-  ## Module lifecycle state
   ModuleState* {.pure.} = enum
     msUnloaded
     msLoaded
@@ -123,13 +75,11 @@ type
     msStopping
     msError
 
-  ## Module execution mode
   ModuleMode* {.pure.} = enum
     mmDirect
     mmLocalTransport
     mmRemoteTransport
 
-  ## Route state
   RouteState* {.pure.} = enum
     rsEstablishing
     rsReady
@@ -137,10 +87,6 @@ type
     rsRevoked
     rsFailed
     rsClosed
-
-# ============================================================================
-# String conversion helpers
-# ============================================================================
 
 proc stateName*(s: ModuleState): string =
   case s
@@ -165,158 +111,341 @@ proc routeStateName*(s: RouteState): string =
   of rsFailed: "failed"
   of rsClosed: "closed"
 
-proc stringToModuleState*(s: string): ModuleState =
-  case s
-  of "unloaded": msUnloaded
-  of "loaded": msLoaded
-  of "ready": msReady
-  of "stopping": msStopping
-  of "error": msError
-  else: msError
-
-proc stringToModuleMode*(s: string): ModuleMode =
-  case s
-  of "direct": mmDirect
-  of "local-transport": mmLocalTransport
-  of "remote-transport": mmRemoteTransport
-  else: mmDirect
-
-proc stringToRouteState*(s: string): RouteState =
-  case s
-  of "establishing": rsEstablishing
-  of "ready": rsReady
-  of "draining": rsDraining
-  of "revoked": rsRevoked
-  of "failed": rsFailed
-  of "closed": rsClosed
-  else: rsEstablishing
+## Terminal route states: once reached, a later renewal MUST fail (§9.1).
+func isTerminalRouteState*(s: RouteState): bool =
+  s in {rsRevoked, rsFailed, rsClosed}
 
 # ============================================================================
-# Runtime Control records
+# Runtime addresses (§9.3): unix-stream, tls-tcp, quic. NO plain tcp.
 # ============================================================================
 
 type
-  ## Invocation descriptor - field names match CDDL exactly
+  RuntimeAddressKind* {.pure.} = enum
+    rakUnixStream
+    rakTlsTcp
+    rakQuic
+
+  UnixStreamRuntimeAddress* = object
+    path*: Path
+    profile*: Opt[AddressProfile]
+
+  TlsTcpRuntimeAddress* = object
+    host*: HostName
+    port*: Port
+    serverName*: Opt[ServerName]
+    profile*: Opt[AddressProfile]
+
+  QuicRuntimeAddress* = object
+    host*: HostName
+    port*: Port
+    serverName*: Opt[ServerName]
+    alpn*: Opt[Alpn]
+    profile*: Opt[AddressProfile]
+
+  ## `logos.runtime_control.runtime_address` (discriminated by transport)
+  RuntimeAddress* = object
+    kind*: RuntimeAddressKind
+    unixStream*: UnixStreamRuntimeAddress
+    tlsTcp*: TlsTcpRuntimeAddress
+    quic*: QuicRuntimeAddress
+
+  ## `logos.runtime_control.runtime_endpoint`
+  RuntimeEndpoint* = object
+    runtimeInstanceId*: Opt[RuntimeInstanceId]
+    address*: RuntimeAddress
+
+  ## `logos.runtime_control.remote_provider_target`
+  RemoteProviderTarget* = object
+    runtime*: RuntimeEndpoint
+    provider*: Opt[ModuleProviderId]
+    module*: Opt[ModuleName]
+
+  ## `logos.runtime_control.remote_listener_address` (tls-tcp or quic only)
+  RemoteListenerAddress* = object
+    kind*: RuntimeAddressKind ## rakTlsTcp or rakQuic
+    tlsTcp*: TlsTcpRuntimeAddress
+    quic*: QuicRuntimeAddress
+
+# ============================================================================
+# Remote enrollment / listener / export records (§9.3) — POC: types only,
+# remote enforcement is Phase 5.
+# ============================================================================
+
+type
+  RemoteIdentityProfile* = string ## "logos.remote.tls-tcp" / "logos.remote.quic"
+
+  RemoteRuntimeEnrollment* = object
+    runtimeInstanceId*: RuntimeInstanceId
+    profile*: RemoteIdentityProfile
+    revision*: uint64
+    status*: string ## "active" / "revoked"
+    trustAnchor*: Opt[TrustAnchorId]
+    subjectPublicKeys*: seq[SubjectPublicKeyInfo]
+
+  RemoteListenerRecord* = object
+    address*: RemoteListenerAddress
+    enabled*: bool
+    runtimeControlEnabled*: bool
+
+  ProviderExportRecord* = object
+    listener*: RemoteListenerAddress
+    provider*: ModuleProviderAddress
+    enabled*: bool
+
+# ============================================================================
+# Core records (§9.3)
+# ============================================================================
+
+type
+  ## `logos.runtime_control.invocation_descriptor` (local | remote)
   InvocationDescriptor* = object
-    kind*: ModuleMode
-    descriptor_kind*: DescriptorKind
-    descriptor*: Opt[seq[byte]]
+    kind*: string ## "local-transport" / "remote-transport"
+    # local-transport fields
+    profile*: Opt[string] ## "logos.local.unix-stream"
+    path*: Opt[Path]
+    ticket*: Opt[seq[byte]] ## bstr 32
+    # remote-transport fields
+    runtime*: Opt[RuntimeInstanceId]
+    provider*: Opt[ModuleProviderId]
+    endpoint*: Opt[RemoteListenerAddress]
 
-  ## Route authority - field names match CDDL exactly
-  RouteAuthority* = object
-    authority_provider*: Opt[ModuleProviderAddress]
-    authority_ref*: Opt[AuthorityRef]
-    expires_at*: Opt[uint64]
-    audit_ref*: Opt[AuditRef]
-
-  ## Route failure info - field names match CDDL exactly
+  ## `logos.runtime_control.route_failure`
   RouteFailure* = object
     code*: FailureCode
     message*: Opt[Reason]
 
-  ## Module record (runtime introspection) - field names match CDDL exactly
+  ## `logos.runtime_control.route_access` (32-byte declaration roots).
+  ## The `*Absent` flags distinguish an absent list (permits every declaration
+  ## of that kind, RUNTIME §9.3) from a present empty list (permits none).
+  RouteAccess* = object
+    methods*: seq[seq[byte]] ## [* bstr 32]
+    publishEvents*: seq[seq[byte]]
+    subscribeEvents*: seq[seq[byte]]
+    methodsAbsent*: bool ## absent methods list (permit all)
+    publishEventsAbsent*: bool ## absent publish_events list (permit all)
+    subscribeEventsAbsent*: bool ## absent subscribe_events list (permit all)
+
+  ## `logos.runtime_control.module_record`
   ModuleRecord* = object
     module*: ModuleName
     provider*: Opt[ModuleProviderAddress]
     remote*: Opt[RemoteProviderTarget]
     instance*: Opt[ModuleInstanceId]
+    stateAssignment*: Opt[ModuleStateAssignmentId]
     state*: ModuleState
     mode*: ModuleMode
-    schema_namespace*: Opt[SchemaNamespace]
-    schema*: Opt[SchemaCommitment]
+    primaryContract*: Opt[SchemaCommitment]
+    implements*: seq[SchemaCommitment]
     reason*: Opt[Reason]
 
-  ## Route record - field names match CDDL exactly
+  ## `logos.runtime_control.route_record`
   RouteRecord* = object
     route*: RouteId
-    caller_runtime*: RuntimeInstanceId
-    target_provider*: ModuleProviderAddress
+    consumer*: ModuleInstanceAddress
+    targetProvider*: ModuleProviderAddress
     module*: ModuleName
     instance*: Opt[ModuleInstanceId]
-    schema_namespace*: Opt[SchemaNamespace]
-    schema*: Opt[SchemaCommitment]
+    expectedContract*: Opt[SchemaCommitment]
+    access*: RouteAccess
     state*: RouteState
-    invocation*: InvocationDescriptor
-    authority*: Opt[RouteAuthority]
+    invocation*: Opt[InvocationDescriptor]
+    decisionId*: Opt[DecisionId]
+    expiresAt*: Opt[uint64]
     failure*: Opt[RouteFailure]
 
 # ============================================================================
-# Runtime Control method request/response types
-# These types match the CDDL schema for each method's request/response
-# and can be passed to Cbor.encode() for CBOR serialization.
+# Method request/response types (§9.3)
 # ============================================================================
 
 type
-  ## Module record inline for list_modules_response
-  ModuleRecordInline* = object
-    module*: ModuleName
-    provider*: Opt[ProviderAddressInline]
-    remote*: Opt[RemoteProviderInline]
-    instance*: Opt[ModuleInstanceId]
-    state*: ModuleState
-    mode*: ModuleMode
-    schema_namespace*: Opt[SchemaNamespace]
-    schema*: Opt[SchemaCommitment]
+  ProviderRequirementCardinality* = string ## "single" / "all-runtime-visible"
+
+  EstablishRouteRequest* = object
+    requestKey*: string
+    contract*: SchemaCommitment
+    cardinality*: ProviderRequirementCardinality
+    provider*: Opt[ModuleProviderAddress]
+    access*: RouteAccess
+
+  EstablishRouteResponse* = object
+    routes*: seq[RouteRecord]
+    partial*: bool
+
+  RenewRouteRequest* = object
+    requestKey*: string
+    route*: RouteId
+
+  RenewRouteResponse* = object
+    route*: RouteRecord
+
+  ListModulesRequest* = object
+
+  ListModulesResponse* = object
+    modules*: seq[ModuleRecord]
+    partial*: bool
+
+  ListRoutesRequest* = object
+    module*: Opt[ModuleName]
+    provider*: Opt[ModuleProviderAddress]
+
+  ListRoutesResponse* = object
+    routes*: seq[RouteRecord]
+    partial*: bool
+
+  CloseRouteRequest* = object
+    route*: RouteId
     reason*: Opt[Reason]
 
-  ## Inline provider address (no runtime_instance_id)
-  ProviderAddressInline* = object
-    provider*: ModuleProviderId
-
-  ## Inline remote provider (simplified)
-  RemoteProviderInline* = object
-    runtime*: RuntimeEndpointInline
-    provider*: Opt[ModuleProviderId]
-    module*: Opt[ModuleName]
-
-  ## Inline runtime endpoint (no address for simplicity)
-  RuntimeEndpointInline* = object
-    runtime_instance_id*: Opt[RuntimeInstanceId]
-
-  ## Route record inline for list_routes_response
-  RouteRecordInline* = object
+  CloseRouteResponse* = object
     route*: RouteId
-    caller_runtime*: RuntimeInstanceId
-    target_provider*: ModuleProviderAddress
+    state*: RouteState
+
+  StartModuleRequest* = object
     module*: ModuleName
     instance*: Opt[ModuleInstanceId]
-    schema_namespace*: Opt[SchemaNamespace]
-    schema*: Opt[SchemaCommitment]
-    state*: RouteState
-    invocation*: InvocationDescriptor
-    authority*: Opt[RouteAuthority]
-    failure*: Opt[RouteFailure]
 
-## Request/Response types for each method
-type
-  ## list_modules response
-  ListModulesResponse* = object
-    modules*: seq[ModuleRecordInline]
-
-  ## list_routes response
-  ListRoutesResponse* = object
-    routes*: seq[RouteRecordInline]
-
-  ## revoke_route response
-  RevokeRouteResponse* = object
-    route*: RouteId
-    state*: RouteState
-
-  ## start_module response
   StartModuleResponse* = object
     module*: ModuleName
-    instance*: string
+    instance*: ModuleInstanceId
     state*: ModuleState
 
-  ## stop_module response
+  StopModuleRequest* = object
+    module*: ModuleName
+    instance*: Opt[ModuleInstanceId]
+
   StopModuleResponse* = object
     module*: ModuleName
-    instance*: Opt[string]
+    instance*: Opt[ModuleInstanceId]
     state*: ModuleState
 
-  ## get_readiness response
+  GetReadinessRequest* = object
+    module*: ModuleName
+    instance*: Opt[ModuleInstanceId]
+
   GetReadinessResponse* = object
     module*: ModuleName
-    instance*: Opt[string]
+    instance*: Opt[ModuleInstanceId]
     state*: ModuleState
     reason*: Opt[Reason]
+
+  # -- remote listener / export (POC: local stub) --
+  ListRemoteListenersRequest* = object
+  ListRemoteListenersResponse* = object
+    listeners*: seq[RemoteListenerRecord]
+    partial*: bool
+
+  SetRemoteListenerRequest* = object
+    listener*: RemoteListenerRecord
+
+  SetRemoteListenerResponse* = object
+    listener*: RemoteListenerRecord
+
+  ListProviderExportsRequest* = object
+    listener*: Opt[RemoteListenerAddress]
+    provider*: Opt[ModuleProviderAddress]
+
+  ListProviderExportsResponse* = object
+    exports*: seq[ProviderExportRecord]
+    partial*: bool
+
+  SetProviderExportRequest* = object
+    exportRecord*: ProviderExportRecord ## CDDL key: "export"
+
+  SetProviderExportResponse* = object
+    exportRecord*: ProviderExportRecord ## CDDL key: "export"
+
+  # -- state events --
+  ModuleStateChangedEvent* = object
+    module*: ModuleName
+    instance*: Opt[ModuleInstanceId]
+    oldState*: ModuleState
+    newState*: ModuleState
+    reason*: Opt[Reason]
+
+  RouteStateChangedEvent* = object
+    route*: RouteId
+    oldState*: RouteState
+    newState*: RouteState
+    module*: Opt[ModuleName]
+    provider*: Opt[ModuleProviderAddress]
+    reason*: Opt[Reason]
+
+# ============================================================================
+# Configuration methods (§9.3) — reference LOGOS-MODULE-CONFIGURATION types.
+# POC: types only; the state machine + value records are Phase 5.
+# ============================================================================
+
+type
+  ## `logos.module_configuration.schema_commitment` (distinct from the
+  ## `logos.schema_commitment` above — a configuration schema document + root).
+  ConfigSchemaCommitment* = object
+    schemaDocument*: seq[byte]
+    configurationRoot*: seq[byte]
+
+  ConfigurationState* = string ## "absent" / "current" / "staged" / "error"
+
+  GetConfigurationSchemaRequest* = object
+    target*: ModuleInstanceAddress
+
+  GetConfigurationSchemaResponse* = object
+    target*: ModuleInstanceAddress
+    stateRevision*: uint64
+    schema*: ConfigSchemaCommitment
+
+  GetConfigurationRequest* = object
+    target*: ModuleInstanceAddress
+
+  GetConfigurationResponse* = object
+    target*: ModuleInstanceAddress
+    state*: ConfigurationState
+
+  UpdateConfigurationRequest* = object
+    target*: ModuleInstanceAddress
+    expectedStateRevision*: uint64
+    expectedSchemaCommitment*: ConfigSchemaCommitment
+    action*: string ## "stage" / "discard"
+    value*: Opt[seq[byte]] ## configuration_value (stage only)
+
+  UpdateConfigurationResponse* = object
+    target*: ModuleInstanceAddress
+    stateRevision*: uint64
+    staged*: Opt[seq[byte]]
+
+  ApplyConfigurationRequest* = object
+    target*: ModuleInstanceAddress
+    expectedStateRevision*: uint64
+
+  ApplyConfigurationResponse* = object
+    target*: ModuleInstanceAddress
+    stateRevision*: uint64
+    appliedValueRevision*: uint64
+
+  ConfigurationStateChangedEvent* = object
+    target*: ModuleInstanceAddress
+    state*: ConfigurationState
+
+# ============================================================================
+# `route_access` scope validation (RUNTIME §9.3)
+# ============================================================================
+
+## Validate one present `route_access` list (RUNTIME §9.3): strictly
+## ascending bytewise lexicographic order, no duplicates. An absent list is
+## not validated (it permits every declaration of that kind).
+func validateAccessList*(items: seq[seq[byte]]): Result[void, string] =
+  for i in 1 ..< items.len:
+    if cmpBytes(items[i - 1], items[i]) >= 0:
+      return
+        err("route_access list is not in strictly ascending order or has duplicates")
+  ok()
+
+## Validate the whole `route_access` value (RUNTIME §9.3). Each present list
+## MUST be strictly ascending with no duplicates; the Runtime MUST NOT silently
+## sort or deduplicate a received value.
+func validateRouteAccess*(access: RouteAccess): Result[void, string] =
+  if not access.methodsAbsent:
+    ?validateAccessList(access.methods)
+  if not access.publishEventsAbsent:
+    ?validateAccessList(access.publishEvents)
+  if not access.subscribeEventsAbsent:
+    ?validateAccessList(access.subscribeEvents)
+  ok()

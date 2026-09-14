@@ -1,7 +1,12 @@
 import
   std/[os, net, strutils, tables, sequtils],
   results,
-  ./logos_core/[cbor_stuff, schemas, runtime, tcp_modules, tcp_host]
+  ./logos_core/[cbor_stuff, cbor_profile, schemas, runtime, tcp_modules, tcp_host]
+
+type
+  ## The new deterministic-CBOR value type (cbor_profile); the bare name is
+  ## ambiguous with the old cbor_serialization type re-exported by cbor_stuff.
+  PVal = cbor_profile.CborValue
 
 const defaultPort = net.Port(8543)
 
@@ -17,6 +22,8 @@ type
     ccStopHost
     ccLoop
     ccRun
+    ccStartUnixHost
+    ccStopUnixHost
 
   CliArgs* = object
     cmd*: CliCmd
@@ -63,6 +70,13 @@ proc printFullUsage() =
   echo ""
   echo "  stop-host"
   echo "    Stop the TCP host server"
+  echo ""
+  echo "  start-unix-host <module> <baseDir>"
+  echo "    Start the conformant local-transport (unix-stream) provider"
+  echo "    endpoint for a module and serve it (blocking, TRANSPORT §8)"
+  echo ""
+  echo "  stop-unix-host"
+  echo "    Stop the unix-stream host"
   echo ""
   echo "  loop [port]"
   echo "    Start TCP host and keep running to serve clients (default: 8543)"
@@ -154,6 +168,17 @@ proc parseArgs(): CliArgs =
     while i <= paramCount():
       result.loopCmds.add(paramStr(i))
       inc i
+  of "start-unix-host":
+    # start-unix-host <module> <baseDir>: the conformant local-transport path
+    result.cmd = ccStartUnixHost
+    if i <= paramCount():
+      result.callModule = paramStr(i) # reuse: the module name
+      inc i
+    if i <= paramCount():
+      result.loadPath = paramStr(i) # reuse: the base dir
+      inc i
+  of "stop-unix-host":
+    result.cmd = ccStopUnixHost
   of "run":
     result.cmd = ccRun
     var currentCmds: seq[string] = @[]
@@ -174,9 +199,13 @@ proc parseArgs(): CliArgs =
     quit(1)
 
 proc doLoad(rt: var Runtime, path: string): Result[void, string] =
-  let loaded = rt.load(path)
+  ## POC: the expected module name is derived from the file name and the
+  ## module is assumed to be a provider (the production host resolves it
+  ## from the module record).
+  let expectedName = moduleNameFromPath(path)
+  let loaded = rt.load(path, expectedName, true)
   if loaded.isOk:
-    echo "  Loaded: ", loaded.get[0], " (version ", loaded.get[1], ")"
+    echo "  Loaded: ", loaded.get[0]
     ok()
   else:
     err("Load failed: " & loaded.error)
@@ -220,7 +249,7 @@ proc doMethods(rt: Runtime, name: string): Result[void, string] =
   ok()
 
 proc doCall(
-    rt: Runtime, moduleName: string, methodName: string, argStrs: seq[string]
+    rt: var Runtime, moduleName: string, methodName: string, argStrs: seq[string]
 ): Result[void, string] =
   let schemaRes = rt.pluginSchema(moduleName)
   if schemaRes.isErr:
@@ -247,8 +276,12 @@ proc doCall(
     if args.hasKey(params[i].name.toLowerAscii):
       params[i].value = args[params[i].name.toLowerAscii]
 
-  let cborParams = buildCborParams(params).valueOr:
-    return err("Parameter error: " & error)
+  # Deterministic-CBOR closed map of the request fields (INTERFACE §4.4).
+  # POC modules use tstr parameters; each field is encoded as a text string.
+  var pairs: seq[(PVal, PVal)] = @[]
+  for p in params:
+    pairs.add((cbor_profile.cborValue(p.name), cbor_profile.cborValue(p.value)))
+  let cborParams = cbor_profile.encodeCbor(cbor_profile.cborMap(pairs))
 
   let dispatch = rt.dispatchPlugin(moduleName, methodName, cborParams).valueOr:
     return err("Dispatch failed: " & error)
@@ -307,6 +340,24 @@ proc doStopHost(rt: var Runtime): Result[void, string] =
     ok()
   else:
     err("Failed to stop TCP host: " & res.error)
+
+proc doStartUnixHost(rt: var Runtime, module, baseDir: string): Result[void, string] =
+  ## Start the conformant local-transport (unix-stream) provider endpoint for
+  ## `module` and serve it (blocking, TRANSPORT §8).
+  if module.len == 0 or baseDir.len == 0:
+    return err("Usage: start-unix-host <module> <baseDir>")
+  let res = rt.startUnixHost(baseDir, module)
+  if res.isErr:
+    return err("Failed to start unix host: " & res.error)
+  echo "  unix-stream host listening at ", res.get
+  echo "  Serving (press Ctrl-C to stop)."
+  rt.serveUnixHost() # blocking
+  ok()
+
+proc doStopUnixHost(rt: var Runtime): Result[void, string] =
+  rt.stopUnixHostForRuntime()
+  echo "  unix-stream host stopped."
+  ok()
 
 proc parseSingleCmd(line: string): (CliCmd, seq[string]) =
   ## Parse a single command line into (command, args)
@@ -378,6 +429,22 @@ proc executeCmd(rt: var Runtime, cmd: CliCmd, args: seq[string]): Result[void, s
     doStartHost(rt, port)
   of ccStopHost:
     doStopHost(rt)
+  of ccStartUnixHost:
+    var uModule = ""
+    var uBaseDir = ""
+    for a in args:
+      if a.startsWith("--module="):
+        uModule = a[9 ..< a.len]
+      elif a.startsWith("--base-dir="):
+        uBaseDir = a[11 ..< a.len]
+      elif not a.startsWith("--"):
+        if uModule.len == 0:
+          uModule = a
+        else:
+          uBaseDir = a
+    doStartUnixHost(rt, uModule, uBaseDir)
+  of ccStopUnixHost:
+    doStopUnixHost(rt)
   else:
     err("Unknown command")
 
@@ -485,6 +552,17 @@ proc main() =
       sleep(1000) # Sleep 1 second at a time
   of ccStopHost:
     let res = doStopHost(rt)
+    if res.isErr:
+      quit("Error: " & res.error)
+  of ccStartUnixHost:
+    if args.callModule.len == 0 or args.loadPath.len == 0:
+      echo "Usage: runtime-cli start-unix-host <module> <baseDir>"
+      quit(1)
+    let res = doStartUnixHost(rt, args.callModule, args.loadPath)
+    if res.isErr:
+      quit("Error: " & res.error)
+  of ccStopUnixHost:
+    let res = doStopUnixHost(rt)
     if res.isErr:
       quit("Error: " & res.error)
 

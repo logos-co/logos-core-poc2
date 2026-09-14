@@ -223,7 +223,7 @@ proc handleClient*(host: TcpHost, client: Socket) {.gcsafe.} =
             module: "tcp_host",
             version: @[1'u32, 0'u32],
             token: @[],
-            schema: SchemaCommitment(
+            schema: transport.SchemaCommitment(
               commitmentModel: "logos.commitment-model.2026-06",
               schemaRoot: @[],
               hashProfile: "logos.hash-profile.2026-05",
